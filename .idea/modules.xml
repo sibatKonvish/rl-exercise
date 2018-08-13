@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/ksh.iml" filepath="$PROJECT_DIR$/.idea/modules/ksh.iml" group="ksh" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/ksh/ksh_main.iml" filepath="$PROJECT_DIR$/.idea/modules/ksh/ksh_main.iml" group="ksh" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/ksh/ksh_test.iml" filepath="$PROJECT_DIR$/.idea/modules/ksh/ksh_test.iml" group="ksh" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/rl-exercise.iml" filepath="$PROJECT_DIR$/.idea/modules/rl-exercise.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/rl-exercise_main.iml" filepath="$PROJECT_DIR$/.idea/modules/rl-exercise_main.iml" group="rl-exercise" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/rl-exercise_test.iml" filepath="$PROJECT_DIR$/.idea/modules/rl-exercise_test.iml" group="rl-exercise" />
+    </modules>
+  </component>
+</project>
