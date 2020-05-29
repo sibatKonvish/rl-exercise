@@ -7,7 +7,7 @@ import scala.collection.mutable
   */
 abstract class Environment {
   protected val reward = new mutable.HashMap[State, Double]()
-  private var init_state: State = new State(1)
+  protected var init_state: State = new State(1)
   private var action = new Action(Array("l", "r"))
 
   /**
@@ -56,7 +56,7 @@ abstract class Environment {
     * @param state 当前状态
     * @return
     */
-  def get_reward(state: State): Double= reward.getOrElse(state, 0.0)
+  def get_reward(state: State): Double = reward.getOrElse(state, 0.0)
 
   /**
     * 当前状态执行完action后的下一个状态

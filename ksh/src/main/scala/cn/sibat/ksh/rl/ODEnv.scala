@@ -258,6 +258,8 @@ class MultiODWithCapacityEnv(width: Int, height: Int) extends Environment with M
 
 /**
   * 以state为中心向周边做+1的detect，形成状态
+  * 编码：当前坐标（2）,侦测范围（（1+detect*2）*（1+detect*2）-1）
+  * 即编码长度：1+（1+detect*2）*（1+detect*2）
   *
   * Created by kong at 2020/5/18
   */
@@ -319,6 +321,32 @@ class MultiODWithDetectEnv(width: Int, height: Int, detect: Int) extends Environ
     reward
   }
 
+  override def getInitState: State = {
+    val newState = init_state
+    val newVec = newState.currentState
+    val center = (newVec(0), newVec(1))
+    val coords = (-detect to detect).flatMap(t => (-detect to detect).map(s => (t, s))).toArray.filter(_ != (0, 0))
+    val neighbor = coords.map(t => {
+      val head = center._1 + t._1
+      val last = center._2 + t._2
+      if (head < 0 || last < 0) //超出边框
+        -10
+      else if (ods.exists(s => s._2 == head && s._3 == last)) { //o点
+        val id = ods.find(s => s._2 == head && s._3 == last).get
+        if (pick.contains(id._1))
+          0
+        else
+          -1
+      } else if (ods.exists(s => s._4 == head && s._5 == last)) //d点
+        +1
+      else //空白点
+        0
+    })
+    for (i <- actions.head.length until newVec.length) {
+      newVec(i) = neighbor(i - actions.head.length)
+    }
+    newState
+  }
 
   /**
     * 获得当前状态下执行action的反馈
@@ -390,6 +418,7 @@ class MultiODWithDetectEnv(width: Int, height: Int, detect: Int) extends Environ
   * 编码：当前坐标（2）,侦测范围（（1+detect*2）*（1+detect*2）-1）,导航（4）
   * 即编码长度：5+（1+detect*2）*（1+detect*2）
   * (-1.0, -0.5, 0.0, 0.5, 1.0)全O,有OD偏O,无OD,有OD偏D,全D
+  *
   * Created by kong at 2020/5/18
   */
 class MultiODWithDetectAndDirectEnv(width: Int, height: Int, detect: Int) extends Environment with MultiOD {
@@ -463,6 +492,70 @@ class MultiODWithDetectAndDirectEnv(width: Int, height: Int, detect: Int) extend
     get_reward(next_state)
   }
 
+  override def getInitState: State = {
+    val newState = init_state
+    val newVec = newState.currentState
+    val center = (newVec(0), newVec(1))
+    val coords = (-detect to detect).flatMap(t => (-detect to detect).map(s => (t, s))).toArray.filter(_ != (0, 0))
+    val neighbor = coords.map(t => {
+      val head = t._1 + center._1
+      val last = t._2 + center._2
+      if (head < 0 || last < 0) //超出边框
+        -10
+      else if (ods.exists(s => s._2 == head && s._3 == last)) { //o点
+        val id = ods.find(s => s._2 == head && s._3 == last).get
+        if (pick.contains(id._1)) //已经过
+          0
+        else
+          -1
+      } else if (ods.exists(s => s._4 == head && s._5 == last)) //d点
+        +1
+      else //空白点
+        0
+    })
+    //侦测信息
+    for (i <- actions.head.length until newVec.length - 4) {
+      newVec(i) = neighbor(i - actions.head.length)
+    }
+    //方向信息
+    val map = new mutable.HashMap[String, Int]()
+    for (od <- ods) {
+      val o = (od._2 - center._1, od._3 - center._2)
+      val d = (od._4 - center._1, od._5 - center._2)
+      if (!pick.contains(od._1))
+        if (o._1 <= 0 && o._2 < 0) {
+          map.put(s"o-${newVec.length - 4}", map.getOrElse(s"o-${newVec.length - 4}", 0) + 1)
+        } else if (o._1 > 0 && o._2 <= 0) {
+          map.put(s"o-${newVec.length - 3}", map.getOrElse(s"o-${newVec.length - 3}", 0) + 1)
+        } else if (o._1 < 0 && o._2 >= 0) {
+          map.put(s"o-${newVec.length - 2}", map.getOrElse(s"o-${newVec.length - 2}", 0) + 1)
+        } else if (o._1 >= 0 && o._2 > 0) {
+          map.put(s"o-${newVec.length - 1}", map.getOrElse(s"o-${newVec.length - 1}", 0) + 1)
+        }
+
+      if (d._1 <= 0 && d._2 < 0) {
+        map.put(s"d-${newVec.length - 4}", map.getOrElse(s"d-${newVec.length - 4}", 0) + 1)
+      } else if (d._1 > 0 && d._2 <= 0) {
+        map.put(s"d-${newVec.length - 3}", map.getOrElse(s"d-${newVec.length - 3}", 0) + 1)
+      } else if (d._1 < 0 && d._2 >= 0) {
+        map.put(s"d-${newVec.length - 2}", map.getOrElse(s"d-${newVec.length - 2}", 0) + 1)
+      } else if (d._1 >= 0 && d._2 > 0) {
+        map.put(s"d-${newVec.length - 1}", map.getOrElse(s"d-${newVec.length - 1}", 0) + 1)
+      }
+    }
+    for (i <- newVec.length - 4 until newVec.length) {
+      if (map.getOrElse(s"o-$i", 0) > 0 && map.getOrElse(s"d-$i", 0) > 0) {
+        newVec(i) = if (map(s"o-$i").toFloat / map(s"d-$i") > 1.0) -0.5 else 0.5
+      } else if (map.getOrElse(s"o-$i", 0) > 0 && map.getOrElse(s"d-$i", 0) == 0) {
+        newVec(i) = -1.0
+      } else if (map.getOrElse(s"o-$i", 0) == 0 && map.getOrElse(s"d-$i", 0) > 0) {
+        newVec(i) = 1.0
+      } else
+        newVec(i) = 0.0
+    }
+    newState
+  }
+
   /**
     * 当前状态执行完action后的下一个状态
     *
@@ -497,7 +590,7 @@ class MultiODWithDetectAndDirectEnv(width: Int, height: Int, detect: Int) extend
         0
     })
     //侦测信息
-    for (i <- s.length until newVec.length) {
+    for (i <- s.length until newVec.length - 4) {
       newVec(i) = neighbor(i - s.length)
     }
     //方向信息

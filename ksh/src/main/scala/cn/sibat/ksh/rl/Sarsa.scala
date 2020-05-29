@@ -101,7 +101,7 @@ class Sarsa(env: Environment) extends RL {
 
 object Sarsa {
   def main(args: Array[String]): Unit = {
-    val env = new MultiODWithDetectEnv(6, 6, detect = 1)
+    val env = new MultiODWithDetectAndDirectEnv(6, 6, detect = 1)
     val ods = Array((0, 1, 1, 3, 2), (1, 2, 2, 1, 3), (2, 4, 0, 0, 4))
     env.setODS(ods)
     val sarsa = new Sarsa(env)

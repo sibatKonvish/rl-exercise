@@ -47,7 +47,7 @@ class DeepSarsa(env: Environment) extends RL {
     */
   def build_model(model_path: String = "null"): Unit = {
     if (load_model) {
-      model = ComputationGraph.load(new File(""), false)
+      model = ComputationGraph.load(new File(model_path), false)
     } else {
       val conf = new NeuralNetConfiguration.Builder()
         .updater(new Adam(learning_rate))
@@ -143,7 +143,7 @@ class DeepSarsa(env: Environment) extends RL {
     val moves = new ArrayBuffer[String]()
     val states = new ArrayBuffer[State]()
     var reward = 0.0
-    while (env.asInstanceOf[MultiODEnv].ods.nonEmpty) {
+    while (env.asInstanceOf[MultiOD].ods.nonEmpty) {
       val action = get_action(start)
       val next_state = env.state_after_action(start, action)
       count += 1 //up,right,down,left
@@ -154,7 +154,7 @@ class DeepSarsa(env: Environment) extends RL {
       }
       reward = env.get_action_reward(start, action)
       val next_action = get_action(next_state)
-      val done = env.asInstanceOf[MultiODEnv].ods.isEmpty
+      val done = env.asInstanceOf[MultiOD].ods.isEmpty
       train_model(start, action, reward, next_state, next_action, done)
       start = next_state
     }
@@ -168,7 +168,7 @@ class DeepSarsa(env: Environment) extends RL {
 
 object DeepSarsa {
   def main(args: Array[String]): Unit = {
-    val env = new MultiODWithDetectEnv(5, 5, 1)
+    val env = new MultiODWithDetectAndDirectEnv(5, 5, 1)
     val ods = Array((0, 1, 1, 3, 2), (1, 2, 2, 1, 3), (2, 4, 0, 0, 4))
     env.setODS(ods)
     val sarsa = new DeepSarsa(env)
@@ -180,6 +180,8 @@ object DeepSarsa {
       sarsa.move_by_policy2(false)
       print(s"\rexec:$i")
     }
+    val model = new File("ksh/src/main/resources/deepsarsa")
+    sarsa.model.save(model, true)
     println("after improve:")
     env.reset(ods)
     sarsa.move_by_policy2(true)
