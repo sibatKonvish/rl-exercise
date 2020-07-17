@@ -19,7 +19,7 @@ import scala.util.Random
   * Created by kong at 2020/5/28
   */
 class DQN(env: Environment) extends RL {
-  private val load_model = false
+  private var load_model = false
   private val state_size = env.getInitState.currentState.length
   private val action_size = env.getAction.size
 
@@ -27,7 +27,7 @@ class DQN(env: Environment) extends RL {
   private val learning_rate = 0.001
   private var epsilon = 1.0
   private val epsilon_decay = 0.999
-  private val epsilon_min = 0.01
+  private val epsilon_min = 0.1
   private val batch_size = 64
   private val train_start = 100
   private val memory = new ArrayBuffer[(State, Int, Double, State, Boolean)]()
@@ -41,16 +41,19 @@ class DQN(env: Environment) extends RL {
     * @param model_path 模型地址
     */
   def build_model(model_path: String = "null"): Unit = {
+    if (!model_path.equals("null"))
+      load_model = true
     if (load_model) {
-      model = ComputationGraph.load(new File(model_path), false)
+      model = ComputationGraph.load(new File(model_path), true)
+      epsilon = 0.3
     } else {
       val conf = new NeuralNetConfiguration.Builder()
         .updater(new Adam(learning_rate))
         .weightInit(WeightInit.XAVIER)
         .graphBuilder()
         .addInputs("input")
-        .addLayer("d1", new DenseLayer.Builder().nIn(state_size).nOut(24).activation(Activation.RELU).build(), "input")
-        .addLayer("d2", new DenseLayer.Builder().nIn(24).nOut(24).activation(Activation.RELU).build(), "d1")
+        .addLayer("d1", new DenseLayer.Builder().nIn(state_size).nOut(24).activation(Activation.LEAKYRELU).build(), "input")
+        .addLayer("d2", new DenseLayer.Builder().nIn(24).nOut(24).activation(Activation.LEAKYRELU).build(), "d1")
         .addLayer("d3", new OutputLayer.Builder(LossFunctions.LossFunction.MSE).nOut(action_size).nIn(24).build(), "d2")
         .setOutputs("d3")
         .build()
@@ -214,10 +217,10 @@ class DQN(env: Environment) extends RL {
 object DQN {
   def main(args: Array[String]): Unit = {
     val env = new MultiODWithDetectAndDirectEnv(5, 5, 1)
-    val ods = Array((0, 1, 1, 3, 2), (1, 2, 2, 1, 3), (2, 4, 0, 0, 4))
+    val ods = Array((0, 1, 1, 3, 2), (1, 2, 2, 1, 3), (2, 4, 0, 0, 4), (3, 3, 3, 0, 1)) //
     env.setODS(ods)
     val sarsa = new DQN(env)
-    sarsa.build_model()
+    sarsa.build_model("ksh/src/main/resources/dqn-2")
     println("before improve:")
     sarsa.move_by_policy2(true)
     for (i <- 0 to 10000) {
@@ -225,7 +228,7 @@ object DQN {
       sarsa.move_by_policy2(false)
       print(s"\rexec:$i")
     }
-    val model = new File("ksh/src/main/resources/dqn")
+    val model = new File("ksh/src/main/resources/dqn-2")
     sarsa.model.save(model, true)
     println("after improve:")
     env.reset(ods)

@@ -1,5 +1,6 @@
 apply plugin: 'java'
 apply plugin: 'scala'
+apply from: 'dependencies.gradle'
 
 /*全局配置*/
 allprojects {
@@ -72,10 +73,15 @@ subprojects {
         mavenCentral()
     }
     dependencies {
-        testCompile group: 'junit', name: 'junit', version: '4.12'
-        compile "org.scala-lang:scala-library:2.11.8"
-        compile "org.scala-lang:scala-compiler:2.11.8"
-        compile "org.scala-lang:scala-reflect:2.11.8"
+        compile "org.apache.spark:spark-core_2.11:$sparkVersion"
+        compile "org.apache.spark:spark-sql_2.11:$sparkVersion"
+        compile "org.apache.spark:spark-streaming_2.11:$sparkVersion"
+        compile "org.apache.spark:spark-graphx_2.11:$sparkVersion"
+        compile "org.apache.spark:spark-mllib_2.11:$sparkVersion"
+        compile "org.apache.spark:spark-yarn_2.11:$sparkVersion"
+        compile "org.scala-lang:scala-library:$scalaVersion"
+        compile "org.scala-lang:scala-compiler:$scalaVersion"
+        compile "org.scala-lang:scala-reflect:$scalaVersion"
     }
     /*生成源码jar*/
     task sourcesJar(type: Jar, dependsOn: classes) {

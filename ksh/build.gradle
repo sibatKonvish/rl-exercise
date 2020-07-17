@@ -1,6 +1,7 @@
-
 dependencies {
     testCompile group: 'junit', name: 'junit', version: '4.12'
     compile "org.nd4j:nd4j-native-platform:1.0.0-beta6"
     compile "org.deeplearning4j:deeplearning4j-core:1.0.0-beta6"
+    compile "org.deeplearning4j:deeplearning4j-zoo:1.0.0-beta6"
+    compile "com.intel.analytics.bigdl:bigdl-SPARK_2.4:0.10.0"
 }
