@@ -1,89 +1,68 @@
 package cn.sibat.ksh.bigdl
 
-import java.nio.ByteBuffer
-import java.nio.file.{Files, Paths}
-
-import com.intel.analytics.bigdl.dataset.image.{BytesToGreyImg, GreyImgNormalizer, GreyImgToBatch}
-import com.intel.analytics.bigdl.dataset.{ByteRecord, DataSet}
-import com.intel.analytics.bigdl.nn.{ClassNLLCriterion, Linear, LogSoftMax, Reshape, Sequential, SpatialConvolution, SpatialMaxPooling, Tanh, Transformer}
-import com.intel.analytics.bigdl.optim.{Loss, Optimizer, SGD, Top1Accuracy, Top5Accuracy, Trigger}
-import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
-import com.intel.analytics.bigdl.utils.{Engine, File}
+import com.intel.analytics.bigdl.nn._
+import com.intel.analytics.bigdl.optim.SGD
+import com.intel.analytics.bigdl.tensor.Tensor
+import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric.NumericFloat
+import com.intel.analytics.bigdl.utils.Engine
+import com.intel.analytics.bigdl.utils.RandomGenerator.RNG
 import org.apache.spark.SparkContext
+import org.apache.spark.sql.SparkSession
 
 /**
-  * Created by kong at 2020/7/17
+  * Created by kong at 2020/7/20
   */
 object SequenceAnomalyDetection {
   def main(args: Array[String]): Unit = {
-    val conf = Engine.createSparkConf().setAppName("SequenceAnomalyDetection")
+    val conf = Engine.createSparkConf().setAppName("SequenceAnomalyDetection").setMaster("local[*]")
     val sc = new SparkContext(conf)
+    sc.setLogLevel("ERROR")
     Engine.init
-    val model = Sequential[Float]()
-    model.add(Reshape(Array(1, 28, 28)))
-      .add(SpatialConvolution(1, 6, 5, 5).setName("conv1_5x5"))
-      .add(Tanh())
-      .add(SpatialMaxPooling(2, 2, 2, 2))
-      .add(SpatialConvolution(6, 12, 5, 5).setName("conv2_5x5"))
-      .add(Tanh())
-      .add(SpatialMaxPooling(2, 2, 2, 2))
-      .add(Reshape(Array(12 * 4 * 4)))
-      .add(Linear(12 * 4 * 4, 100).setName("fc1"))
-      .add(Tanh())
-      .add(Linear(100, 10).setName("fc2"))
-      .add(LogSoftMax())
+    val inputSize = 6
+    val outputSize = 5
+    val hiddenSize = 4
+    val seqLength = 5
 
-    val trainData = "D:/testData/aasData/train-images-idx3-ubyte"
-    val trainLabel = "D:/testData/aasData/train-labels-idx1-ubyte"
-    val validationData = "D:/testData/aasData/t10k-images-idx3-ubyte"
-    val validationLabel = "D:/testData/aasData/t10k-labels-idx1-ubyte"
-    val trainMean = 0.13066047740239506
-    val trainStd = 0.3081078
-    val testMean = 0.13251460696903547
-    val testStd = 0.31048024
-    val trainSet = DataSet.array(load(trainData, trainLabel)) -> BytesToGreyImg(28, 28) -> GreyImgNormalizer(trainMean, trainStd) -> GreyImgToBatch(10)
-
-    val optimizer = Optimizer(model = model, dataset = trainSet, criterion = ClassNLLCriterion[Float]())
-    val validationSet = DataSet.array(load(validationData, validationLabel)) -> BytesToGreyImg(28, 28) -> GreyImgNormalizer(testMean, testStd) -> GreyImgToBatch(10)
-    optimizer.setValidation(trigger = Trigger.everyEpoch, dataset = validationSet, vMethods = Array(new Top1Accuracy[Float](), new Top5Accuracy[Float](), new Loss[Float]()))
-      .setOptimMethod(new SGD[Float](learningRate = 0.05, learningRateDecay = 0.0))
-      .setEndWhen(Trigger.maxEpoch(5))
-      .optimize()
-  }
-
-  def load(featureFile: String, labelFile: String): Array[ByteRecord] = {
-    val featureBuffer = if (featureFile.startsWith("hdfs:")) {
-      ByteBuffer.wrap(File.readHdfsByte(featureFile))
-    } else
-      ByteBuffer.wrap(Files.readAllBytes(Paths.get(featureFile)))
-
-    val labelBuffer = if (featureFile.startsWith("hdfs:"))
-      ByteBuffer.wrap(File.readHdfsByte(labelFile))
-    else ByteBuffer.wrap(Files.readAllBytes(Paths.get(labelFile)))
-    val labelMagicNumber = labelBuffer.getInt
-    val featureMagicNumber = featureBuffer.getInt
-
-    val labelCount = labelBuffer.getInt()
-    val featureCount = featureBuffer.getInt()
-
-    val rowNum = featureBuffer.getInt()
-    val colNum = featureBuffer.getInt()
-    val result = new Array[ByteRecord](featureCount)
-    var i = 0
-    while (i < featureCount) {
-      val img = new Array[Byte](rowNum * colNum)
-      var y = 0
-      while (y < rowNum) {
-        var x = 0
-        while (x < colNum) {
-          img(x + y * colNum) = featureBuffer.get()
-          x += 1
-        }
-        y += 1
-      }
-      result(i) = ByteRecord(img, labelBuffer.get().toFloat + 1.0f)
-      i += 1
+    RNG.setSeed(100)
+    val input = Tensor(Array(1, seqLength, inputSize))
+    val labels = Tensor(Array(1, seqLength))
+    for (i <- 1 to seqLength) {
+      val rdmLabel = math.ceil(RNG.uniform(0, 1) * outputSize).toInt
+      val rdmInput = math.ceil(RNG.uniform(0, 1) * inputSize).toInt
+      input.setValue(1, i, rdmInput, 1.0f)
+      labels.setValue(1, i, rdmLabel)
     }
-    result
+
+    val rec = Recurrent()
+
+    val model = Sequential[Float]()
+      .add(rec.add(LSTM(inputSize, hiddenSize)))
+      .add(TimeDistributed(Linear(hiddenSize, outputSize)))
+
+    val criterion = TimeDistributedCriterion(CrossEntropyCriterion(), false)
+    val sgd = new SGD(learningRate = 0.1, learningRateDecay = 5e-7, weightDecay = 0.1, momentum = 0.002)
+    val params = model.parameters()
+    val weight = params._1.head
+    val grad = params._2.head
+    //    val output = model.forward(input).toTensor
+    //    val _loss = criterion.forward(output, labels)
+    //    model.zeroGradParameters()
+    //    val gradInput = criterion.backward(output, labels)
+    //    model.backward(input, gradInput)
+
+    def feval(x: Tensor[Float]): (Float, Tensor[Float]) = {
+      val output = model.forward(input).toTensor
+      val _loss = criterion.forward(output, labels)
+      model.zeroGradParameters()
+      val gradInput = criterion.backward(output, labels)
+      model.backward(input, gradInput)
+      (_loss, grad)
+    }
+
+    var loss: Array[Float] = null
+    for (i <- 1 to 100) {
+      loss = sgd.optimize(feval, weight)._2
+      println(s"${i}-th loss = ${loss(0)}")
+    }
   }
 }
