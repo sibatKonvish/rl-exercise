@@ -10,11 +10,11 @@ object KeyPointModel {
   def main(args: Array[String]): Unit = {
 
 
-    val criterion = BCECriterion()
+    val criterion = BCECriterion[Float]()
   }
 
   def create_yolov3(): Unit = {
-    val model = Sequential()
-      .add(Convolution(1,32,3,3,strideH = 2,strideW = 2))
+    val model = Sequential[Float]()
+      .add(Convolution[Float](1,32,3,3,strideH = 2,strideW = 2))
   }
 }
