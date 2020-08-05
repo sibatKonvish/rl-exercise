@@ -113,11 +113,11 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
   /**
     * 处理输出的feature map
     *
-    * @param out     Tensor(N,N,nBoxes,4+1+classes)
+    * @param out     Tensor(b,N,N,nBoxes,4+1+classes)
     * @param anchors anchor box列表
     * @return (boxes(N,N,nBoxes,4),confidence(N,N,nBoxes,1),prob(N,N,nBoxes,classes))
     */
-  def process_feats(out: Tensor[Float], anchors: Array[(Int, Int)] = null, shape: (Int, Int) = (416, 416)): (Tensor[Float], Tensor[Float], Tensor[Float]) = {
+  def process_output(out: Tensor[Float], anchors: Array[(Int, Int)] = null, shape: (Int, Int) = (416, 416)): (Tensor[Float], Tensor[Float], Tensor[Float]) = {
     val Array(grid_h, grid_w, num_boxes) = (1 to 3).map(out.size).toArray
     require(anchors.length == num_boxes, s"anchor box 不一致,${anchors.length}!=$num_boxes")
     val stride = shape._1 / grid_h
@@ -159,7 +159,7 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
   /**
     * 将中心点、高、宽坐标转为左上右下坐标形式
     *
-    * @param boxes tensor[x,y,w,h]
+    * @param boxes tensor[b,N,N,nBox,xywh]
     * @return
     */
   def boxes2TopLR(boxes: Tensor[Float]): Tensor[Float] = {
@@ -174,7 +174,7 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
 
   /**
     * 计算两个box的iou
-    * box[x0,y0,x1,y1]
+    * box[x0,y0,x1,y1,score]
     *
     * @param box1 anchor box
     * @param box2 anchor box
@@ -190,6 +190,195 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     val b2_area = (box2._3 - box2._1) * (box2._4 - box2._2)
 
     area / (b1_area + b2_area - area + 1e-5f)
+  }
+
+  /**
+    * 计算iou
+    *
+    * @param boxes1 tensor[batchSize,grid,grid,nBox,xywh]
+    * @param boxes2 tensor[batchSize,grid,grid,nBox,xywh]
+    */
+  def iou(boxes1: Tensor[Float], boxes2: Tensor[Float]): Tensor[Float] = {
+    val wh1 = boxes1.narrow(5, 3, 2) / 2
+    val wh2 = boxes2.narrow(5, 3, 2) / 2
+    val xy_1 = boxes1.narrow(5, 1, 2)
+    val xy_2 = boxes2.narrow(5, 1, 2)
+    val box1_x0y0 = xy_1 - wh1
+    val box1_x1y1 = xy_1 + wh1
+    val box2_x0y0 = xy_2 - wh2
+    val box2_x1y1 = xy_2 + wh2
+    //避免坐标混乱,改变原始值
+    box1_x0y0.cmin(box1_x1y1)
+    box1_x1y1.cmax(box1_x0y0)
+    box2_x0y0.cmin(box2_x1y1)
+    box2_x1y1.cmax(box1_x0y0)
+
+    //两个矩形的面积
+    val box1_area = (box1_x1y1.narrow(5, 1, 1) - box1_x0y0.narrow(5, 1, 1)) cmul (box1_x1y1.narrow(5, 2, 1) - box1_x0y0.narrow(5, 2, 1))
+    val box2_area = (box2_x1y1.narrow(5, 1, 1) - box2_x0y0.narrow(5, 1, 1)) cmul (box2_x1y1.narrow(5, 2, 1) - box2_x0y0.narrow(5, 2, 1))
+
+    //相交矩形的左上和右下坐标
+    val left_up = box1_x0y0.cmax(box2_x0y0) //改变原始值
+    val right_down = box1_x1y1.cmin(box2_x1y1) //改变原始值
+
+    //相交矩阵的面积
+    val intersection = (right_down - left_up).apply1(math.max(0.0f, _))
+    val inter_area = intersection.narrow(5, 1, 1) cmul intersection.narrow(5, 2, 1)
+    val union_area = box1_area + box2_area - inter_area
+    inter_area / union_area.apply1(t => if (t == 0f) 1f else t) //避免分母为0
+  }
+
+  /**
+    * 计算ciou
+    * p2:相交矩阵的对角线的平方
+    * c2:相融矩阵的对角线的平方
+    * v:atan(w/h)
+    * a:v / (1 - iou + v)
+    * ciou = iou - p2 / c2 - a * v
+    *
+    * @param boxes1 tensor[batchSize,grid,grid,nBox,xywh]
+    * @param boxes2 tensor[batchSize,grid,grid,nBox,xywh]
+    */
+  def ciou(boxes1: Tensor[Float], boxes2: Tensor[Float]): Tensor[Float] = {
+    val wh1 = boxes1.narrow(5, 3, 2) / 2
+    val wh2 = boxes2.narrow(5, 3, 2) / 2
+    val xy_1 = boxes1.narrow(5, 1, 2)
+    val xy_2 = boxes2.narrow(5, 1, 2)
+    val box1_x0y0 = xy_1 - wh1
+    val box1_x1y1 = xy_1 + wh1
+    val box2_x0y0 = xy_2 - wh2
+    val box2_x1y1 = xy_2 + wh2
+    //避免坐标混乱,改变原始值
+    box1_x0y0.cmin(box1_x1y1)
+    box1_x1y1.cmax(box1_x0y0)
+    box2_x0y0.cmin(box2_x1y1)
+    box2_x1y1.cmax(box1_x0y0)
+
+    //两个矩形的面积
+    val box1_area = (box1_x1y1.narrow(5, 1, 1) - box1_x0y0.narrow(5, 1, 1)) cmul (box1_x1y1.narrow(5, 2, 1) - box1_x0y0.narrow(5, 2, 1))
+    val box2_area = (box2_x1y1.narrow(5, 1, 1) - box2_x0y0.narrow(5, 1, 1)) cmul (box2_x1y1.narrow(5, 2, 1) - box2_x0y0.narrow(5, 2, 1))
+
+    //相交矩形的左上和右下坐标
+    val left_up = box1_x0y0.clone().cmax(box2_x0y0) //不改变原始值
+    val right_down = box1_x1y1.clone().cmin(box2_x1y1) //不改变原始值
+
+    //相交矩阵的面积
+    val intersection = (right_down - left_up).apply1(math.max(0.0f, _))
+    val inter_area = intersection.narrow(5, 1, 1) cmul intersection.narrow(5, 2, 1)
+    val union_area = box1_area + box2_area - inter_area
+    val iou = inter_area / union_area.apply1(t => if (t == 0f) 1f else t) //避免分母为0
+
+    //包围矩形的左上右下坐标
+    val enclose_left_up = box1_x0y0.cmin(box2_x0y0)
+    val enclose_right_down = box1_x1y1.cmax(box2_x1y1)
+
+    //包围矩阵的对角线的平方
+    val enclose_c2 = (enclose_right_down - enclose_left_up).pow(2).sum(5)
+
+    //两矩形中心点距离的平方
+    val p2 = (xy_1 - xy_2).pow(2).sum(5)
+
+    //增加av
+    val atan1 = (wh1.narrow(5, 1, 1) / wh1.narrow(5, 2, 1)).apply1(math.atan(_).toFloat)
+    val atan2 = (wh2.narrow(5, 1, 1) / wh2.narrow(5, 2, 1).apply1(t => if (t > 0) t else 1f)).apply1(math.atan(_).toFloat)
+    val v = (atan1 - atan2).pow(2).mul(4).div(math.pow(math.Pi, 2).toFloat)
+    val a = v / (iou.clone().mul(-1).add(1) + v)
+    iou.sub(p2 cdiv enclose_c2).sub(a cmul v)
+  }
+
+  /**
+    * 计算diou
+    * p2:相交矩阵的对角线的平方
+    * c2:相融矩阵的对角线的平方
+    * diou = iou - p2 / c2
+    *
+    * @param boxes1 tensor[batchSize,grid,grid,nBox,xywh]
+    * @param boxes2 tensor[batchSize,grid,grid,nBox,xywh]
+    */
+  def diou(boxes1: Tensor[Float], boxes2: Tensor[Float]): Tensor[Float] = {
+    val wh1 = boxes1.narrow(5, 3, 2) / 2
+    val wh2 = boxes2.narrow(5, 3, 2) / 2
+    val xy_1 = boxes1.narrow(5, 1, 2)
+    val xy_2 = boxes2.narrow(5, 1, 2)
+    val box1_x0y0 = xy_1 - wh1
+    val box1_x1y1 = xy_1 + wh1
+    val box2_x0y0 = xy_2 - wh2
+    val box2_x1y1 = xy_2 + wh2
+    //避免坐标混乱,改变原始值
+    box1_x0y0.cmin(box1_x1y1)
+    box1_x1y1.cmax(box1_x0y0)
+    box2_x0y0.cmin(box2_x1y1)
+    box2_x1y1.cmax(box1_x0y0)
+
+    //两个矩形的面积
+    val box1_area = (box1_x1y1.narrow(5, 1, 1) - box1_x0y0.narrow(5, 1, 1)) cmul (box1_x1y1.narrow(5, 2, 1) - box1_x0y0.narrow(5, 2, 1))
+    val box2_area = (box2_x1y1.narrow(5, 1, 1) - box2_x0y0.narrow(5, 1, 1)) cmul (box2_x1y1.narrow(5, 2, 1) - box2_x0y0.narrow(5, 2, 1))
+
+    //相交矩形的左上和右下坐标
+    val left_up = box1_x0y0.clone().cmax(box2_x0y0) //不改变原始值
+    val right_down = box1_x1y1.clone().cmin(box2_x1y1) //不改变原始值
+
+    //相交矩阵的面积
+    val intersection = (right_down - left_up).apply1(math.max(0.0f, _))
+    val inter_area = intersection.narrow(5, 1, 1) cmul intersection.narrow(5, 2, 1)
+    val union_area = box1_area + box2_area - inter_area
+    val iou = inter_area / union_area.apply1(t => if (t == 0f) 1f else t) //避免分母为0
+
+    //包围矩形的左上右下坐标
+    val enclose_left_up = box1_x0y0.cmin(box2_x0y0)
+    val enclose_right_down = box1_x1y1.cmax(box2_x1y1)
+
+    //包围矩阵的对角线的平方
+    val enclose_c2 = (enclose_right_down - enclose_left_up).pow(2).sum(5)
+
+    //两矩形中心点距离的平方
+    val p2 = (xy_1 - xy_2).pow(2).sum(5)
+    iou.sub(p2 cdiv enclose_c2)
+  }
+
+  /**
+    * 计算giou
+    * C:相融的面积
+    * AUB:AUB的面积
+    * giou = iou - (C-AUB)/C
+    *
+    * @param boxes1 tensor[batchSize,grid,grid,nBox,xywh]
+    * @param boxes2 tensor[batchSize,grid,grid,nBox,xywh]
+    */
+  def giou(boxes1: Tensor[Float], boxes2: Tensor[Float]): Tensor[Float] = {
+    val wh1 = boxes1.narrow(5, 3, 2) / 2
+    val wh2 = boxes2.narrow(5, 3, 2) / 2
+    val xy_1 = boxes1.narrow(5, 1, 2)
+    val xy_2 = boxes2.narrow(5, 1, 2)
+    val box1_x0y0 = xy_1 - wh1
+    val box1_x1y1 = xy_1 + wh1
+    val box2_x0y0 = xy_2 - wh2
+    val box2_x1y1 = xy_2 + wh2
+    //避免坐标混乱,改变原始值
+    box1_x0y0.cmin(box1_x1y1)
+    box1_x1y1.cmax(box1_x0y0)
+    box2_x0y0.cmin(box2_x1y1)
+    box2_x1y1.cmax(box1_x0y0)
+
+    //两个矩形的面积
+    val box1_area = (box1_x1y1.narrow(5, 1, 1) - box1_x0y0.narrow(5, 1, 1)) cmul (box1_x1y1.narrow(5, 2, 1) - box1_x0y0.narrow(5, 2, 1))
+    val box2_area = (box2_x1y1.narrow(5, 1, 1) - box2_x0y0.narrow(5, 1, 1)) cmul (box2_x1y1.narrow(5, 2, 1) - box2_x0y0.narrow(5, 2, 1))
+
+    //相交矩形的左上和右下坐标
+    val left_up = box1_x0y0.clone().cmax(box2_x0y0) //不改变原始值
+    val right_down = box1_x1y1.clone().cmin(box2_x1y1) //不改变原始值
+
+    //相交矩阵的面积
+    val intersection = (right_down - left_up).apply1(math.max(0.0f, _))
+    val inter_area = intersection.narrow(5, 1, 1) cmul intersection.narrow(5, 2, 1)
+    val union_area = box1_area + box2_area - inter_area
+    val iou = inter_area / union_area.apply1(t => if (t == 0f) 1f else t) //避免分母为0
+
+    //包围矩形的左上右下坐标
+    val enclose = (box1_x1y1.cmax(box2_x1y1) - box1_x0y0.cmin(box2_x0y0)).apply1(math.max(0.0f, _))
+    val enclose_area = enclose.narrow(5, 1, 1) cmul enclose.narrow(5, 2, 1)
+
+    iou.sub((enclose_area - union_area) / enclose_area)
   }
 
   /**
@@ -278,9 +467,9 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
 
 object YOLO3Detection {
   def main(args: Array[String]): Unit = {
-    val tensor = Tensor[Float](1, 3, 416, 416).rand()
-    val yolo = new YOLO3Detection(3, 5)
-    val model = yolo.createModel()
-    println(model.forward(tensor))
+    val tensor = Tensor(Array(2f, 1f, 2f, 2f), Array(1, 1, 1, 1, 4))
+    val tensor2 = Tensor(Array(1f, 2f, 2f, 2f), Array(1, 1, 1, 1, 4))
+    val d = new YOLOLayer(0.5f, 0.2f)
+    println(d.giou(tensor, tensor2))
   }
 }
