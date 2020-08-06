@@ -1,20 +1,31 @@
 package cn.sibat.ksh.bigdl.yolo3
 
+import java.awt.image.BufferedImage
+import java.io.{BufferedReader, ByteArrayInputStream, ByteArrayOutputStream, File, FileInputStream, FileReader}
+import java.nio.channels.Channels
+import java.nio.file.{Path, Paths}
+
 import com.intel.analytics.bigdl.Module
+import com.intel.analytics.bigdl.dataset.image.{BGRImage, BGRImgToBatch, BytesToBGRImg, BytesToGreyImg}
+import com.intel.analytics.bigdl.dataset.{ByteRecord, DataSet, Image, Sample}
+import com.intel.analytics.bigdl.example.imageclassification.RowToByteRecords
 import com.intel.analytics.bigdl.nn.Graph.ModuleNode
 import com.intel.analytics.bigdl.nn._
-import com.intel.analytics.bigdl.optim.L2Regularizer
+import com.intel.analytics.bigdl.optim.{L2Regularizer, Optimizer, Top1Accuracy, Trigger}
 import com.intel.analytics.bigdl.tensor.Tensor
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric.NumericFloat
 import com.intel.analytics.bigdl.utils.Shape
+import javax.imageio.ImageIO
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 /**
+  * yolo模型
+  *
   * Created by kong at 2020/7/24
   */
-class YOLO3Detection(nBoxes: Int, numClass: Int) {
+class YOLO3Model(nBoxes: Int, numClass: Int) {
   /**
     * dbl模块
     *
@@ -109,7 +120,7 @@ class YOLO3Detection(nBoxes: Int, numClass: Int) {
   }
 }
 
-class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
+object YOLOUtil {
   /**
     * 处理输出的feature map
     *
@@ -195,14 +206,17 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
   /**
     * 计算iou
     *
-    * @param boxes1 tensor[batchSize,grid,grid,nBox,xywh]
-    * @param boxes2 tensor[batchSize,grid,grid,nBox,xywh]
+    * @param boxes1 tensor[:::,xywh]
+    * @param boxes2 tensor[:::,xywh]
     */
   def iou(boxes1: Tensor[Float], boxes2: Tensor[Float]): Tensor[Float] = {
-    val wh1 = boxes1.narrow(5, 3, 2) / 2
-    val wh2 = boxes2.narrow(5, 3, 2) / 2
-    val xy_1 = boxes1.narrow(5, 1, 2)
-    val xy_2 = boxes2.narrow(5, 1, 2)
+    require(boxes1.size().mkString(",").equals(boxes2.size().mkString(",")), s"boxes1 shape ${boxes1.size().mkString(",")} != boxes2 shape ${boxes2.size().mkString(",")}")
+    val shape1 = boxes1.size()
+    val shape2 = boxes2.size()
+    val wh1 = boxes1.narrow(shape1.length, 3, 2) / 2
+    val wh2 = boxes2.narrow(shape2.length, 3, 2) / 2
+    val xy_1 = boxes1.narrow(shape1.length, 1, 2)
+    val xy_2 = boxes2.narrow(shape2.length, 1, 2)
     val box1_x0y0 = xy_1 - wh1
     val box1_x1y1 = xy_1 + wh1
     val box2_x0y0 = xy_2 - wh2
@@ -214,8 +228,8 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     box2_x1y1.cmax(box1_x0y0)
 
     //两个矩形的面积
-    val box1_area = (box1_x1y1.narrow(5, 1, 1) - box1_x0y0.narrow(5, 1, 1)) cmul (box1_x1y1.narrow(5, 2, 1) - box1_x0y0.narrow(5, 2, 1))
-    val box2_area = (box2_x1y1.narrow(5, 1, 1) - box2_x0y0.narrow(5, 1, 1)) cmul (box2_x1y1.narrow(5, 2, 1) - box2_x0y0.narrow(5, 2, 1))
+    val box1_area = (box1_x1y1.narrow(shape1.length, 1, 1) - box1_x0y0.narrow(shape1.length, 1, 1)) cmul (box1_x1y1.narrow(shape1.length, 2, 1) - box1_x0y0.narrow(shape1.length, 2, 1))
+    val box2_area = (box2_x1y1.narrow(shape2.length, 1, 1) - box2_x0y0.narrow(shape2.length, 1, 1)) cmul (box2_x1y1.narrow(shape2.length, 2, 1) - box2_x0y0.narrow(shape2.length, 2, 1))
 
     //相交矩形的左上和右下坐标
     val left_up = box1_x0y0.cmax(box2_x0y0) //改变原始值
@@ -223,7 +237,7 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
 
     //相交矩阵的面积
     val intersection = (right_down - left_up).apply1(math.max(0.0f, _))
-    val inter_area = intersection.narrow(5, 1, 1) cmul intersection.narrow(5, 2, 1)
+    val inter_area = intersection.narrow(shape1.length, 1, 1) cmul intersection.narrow(shape2.length, 2, 1)
     val union_area = box1_area + box2_area - inter_area
     inter_area / union_area.apply1(t => if (t == 0f) 1f else t) //避免分母为0
   }
@@ -240,10 +254,12 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     * @param boxes2 tensor[batchSize,grid,grid,nBox,xywh]
     */
   def ciou(boxes1: Tensor[Float], boxes2: Tensor[Float]): Tensor[Float] = {
-    val wh1 = boxes1.narrow(5, 3, 2) / 2
-    val wh2 = boxes2.narrow(5, 3, 2) / 2
-    val xy_1 = boxes1.narrow(5, 1, 2)
-    val xy_2 = boxes2.narrow(5, 1, 2)
+    require(boxes1.size().mkString(",").equals(boxes2.size().mkString(",")), s"boxes1 shape ${boxes1.size().mkString(",")} != boxes2 shape ${boxes2.size().mkString(",")}")
+    val shape = boxes1.size()
+    val wh1 = boxes1.narrow(shape.length, 3, 2) / 2
+    val wh2 = boxes2.narrow(shape.length, 3, 2) / 2
+    val xy_1 = boxes1.narrow(shape.length, 1, 2)
+    val xy_2 = boxes2.narrow(shape.length, 1, 2)
     val box1_x0y0 = xy_1 - wh1
     val box1_x1y1 = xy_1 + wh1
     val box2_x0y0 = xy_2 - wh2
@@ -255,8 +271,8 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     box2_x1y1.cmax(box1_x0y0)
 
     //两个矩形的面积
-    val box1_area = (box1_x1y1.narrow(5, 1, 1) - box1_x0y0.narrow(5, 1, 1)) cmul (box1_x1y1.narrow(5, 2, 1) - box1_x0y0.narrow(5, 2, 1))
-    val box2_area = (box2_x1y1.narrow(5, 1, 1) - box2_x0y0.narrow(5, 1, 1)) cmul (box2_x1y1.narrow(5, 2, 1) - box2_x0y0.narrow(5, 2, 1))
+    val box1_area = (box1_x1y1.narrow(shape.length, 1, 1) - box1_x0y0.narrow(shape.length, 1, 1)) cmul (box1_x1y1.narrow(shape.length, 2, 1) - box1_x0y0.narrow(shape.length, 2, 1))
+    val box2_area = (box2_x1y1.narrow(shape.length, 1, 1) - box2_x0y0.narrow(shape.length, 1, 1)) cmul (box2_x1y1.narrow(shape.length, 2, 1) - box2_x0y0.narrow(shape.length, 2, 1))
 
     //相交矩形的左上和右下坐标
     val left_up = box1_x0y0.clone().cmax(box2_x0y0) //不改变原始值
@@ -264,7 +280,7 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
 
     //相交矩阵的面积
     val intersection = (right_down - left_up).apply1(math.max(0.0f, _))
-    val inter_area = intersection.narrow(5, 1, 1) cmul intersection.narrow(5, 2, 1)
+    val inter_area = intersection.narrow(shape.length, 1, 1) cmul intersection.narrow(shape.length, 2, 1)
     val union_area = box1_area + box2_area - inter_area
     val iou = inter_area / union_area.apply1(t => if (t == 0f) 1f else t) //避免分母为0
 
@@ -273,14 +289,14 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     val enclose_right_down = box1_x1y1.cmax(box2_x1y1)
 
     //包围矩阵的对角线的平方
-    val enclose_c2 = (enclose_right_down - enclose_left_up).pow(2).sum(5)
+    val enclose_c2 = (enclose_right_down - enclose_left_up).pow(2).sum(shape.length)
 
     //两矩形中心点距离的平方
-    val p2 = (xy_1 - xy_2).pow(2).sum(5)
+    val p2 = (xy_1 - xy_2).pow(2).sum(shape.length)
 
     //增加av
-    val atan1 = (wh1.narrow(5, 1, 1) / wh1.narrow(5, 2, 1)).apply1(math.atan(_).toFloat)
-    val atan2 = (wh2.narrow(5, 1, 1) / wh2.narrow(5, 2, 1).apply1(t => if (t > 0) t else 1f)).apply1(math.atan(_).toFloat)
+    val atan1 = (wh1.narrow(shape.length, 1, 1) / wh1.narrow(shape.length, 2, 1)).apply1(math.atan(_).toFloat)
+    val atan2 = (wh2.narrow(shape.length, 1, 1) / wh2.narrow(shape.length, 2, 1).apply1(t => if (t > 0) t else 1f)).apply1(math.atan(_).toFloat)
     val v = (atan1 - atan2).pow(2).mul(4).div(math.pow(math.Pi, 2).toFloat)
     val a = v / (iou.clone().mul(-1).add(1) + v)
     iou.sub(p2 cdiv enclose_c2).sub(a cmul v)
@@ -296,10 +312,12 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     * @param boxes2 tensor[batchSize,grid,grid,nBox,xywh]
     */
   def diou(boxes1: Tensor[Float], boxes2: Tensor[Float]): Tensor[Float] = {
-    val wh1 = boxes1.narrow(5, 3, 2) / 2
-    val wh2 = boxes2.narrow(5, 3, 2) / 2
-    val xy_1 = boxes1.narrow(5, 1, 2)
-    val xy_2 = boxes2.narrow(5, 1, 2)
+    require(boxes1.size().mkString(",").equals(boxes2.size().mkString(",")), s"boxes1 shape ${boxes1.size().mkString(",")} != boxes2 shape ${boxes2.size().mkString(",")}")
+    val shape = boxes1.size()
+    val wh1 = boxes1.narrow(shape.length, 3, 2) / 2
+    val wh2 = boxes2.narrow(shape.length, 3, 2) / 2
+    val xy_1 = boxes1.narrow(shape.length, 1, 2)
+    val xy_2 = boxes2.narrow(shape.length, 1, 2)
     val box1_x0y0 = xy_1 - wh1
     val box1_x1y1 = xy_1 + wh1
     val box2_x0y0 = xy_2 - wh2
@@ -311,8 +329,8 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     box2_x1y1.cmax(box1_x0y0)
 
     //两个矩形的面积
-    val box1_area = (box1_x1y1.narrow(5, 1, 1) - box1_x0y0.narrow(5, 1, 1)) cmul (box1_x1y1.narrow(5, 2, 1) - box1_x0y0.narrow(5, 2, 1))
-    val box2_area = (box2_x1y1.narrow(5, 1, 1) - box2_x0y0.narrow(5, 1, 1)) cmul (box2_x1y1.narrow(5, 2, 1) - box2_x0y0.narrow(5, 2, 1))
+    val box1_area = (box1_x1y1.narrow(shape.length, 1, 1) - box1_x0y0.narrow(shape.length, 1, 1)) cmul (box1_x1y1.narrow(shape.length, 2, 1) - box1_x0y0.narrow(shape.length, 2, 1))
+    val box2_area = (box2_x1y1.narrow(shape.length, 1, 1) - box2_x0y0.narrow(shape.length, 1, 1)) cmul (box2_x1y1.narrow(shape.length, 2, 1) - box2_x0y0.narrow(shape.length, 2, 1))
 
     //相交矩形的左上和右下坐标
     val left_up = box1_x0y0.clone().cmax(box2_x0y0) //不改变原始值
@@ -320,7 +338,7 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
 
     //相交矩阵的面积
     val intersection = (right_down - left_up).apply1(math.max(0.0f, _))
-    val inter_area = intersection.narrow(5, 1, 1) cmul intersection.narrow(5, 2, 1)
+    val inter_area = intersection.narrow(shape.length, 1, 1) cmul intersection.narrow(shape.length, 2, 1)
     val union_area = box1_area + box2_area - inter_area
     val iou = inter_area / union_area.apply1(t => if (t == 0f) 1f else t) //避免分母为0
 
@@ -329,10 +347,10 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     val enclose_right_down = box1_x1y1.cmax(box2_x1y1)
 
     //包围矩阵的对角线的平方
-    val enclose_c2 = (enclose_right_down - enclose_left_up).pow(2).sum(5)
+    val enclose_c2 = (enclose_right_down - enclose_left_up).pow(2).sum(shape.length)
 
     //两矩形中心点距离的平方
-    val p2 = (xy_1 - xy_2).pow(2).sum(5)
+    val p2 = (xy_1 - xy_2).pow(2).sum(shape.length)
     iou.sub(p2 cdiv enclose_c2)
   }
 
@@ -346,10 +364,12 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     * @param boxes2 tensor[batchSize,grid,grid,nBox,xywh]
     */
   def giou(boxes1: Tensor[Float], boxes2: Tensor[Float]): Tensor[Float] = {
-    val wh1 = boxes1.narrow(5, 3, 2) / 2
-    val wh2 = boxes2.narrow(5, 3, 2) / 2
-    val xy_1 = boxes1.narrow(5, 1, 2)
-    val xy_2 = boxes2.narrow(5, 1, 2)
+    require(boxes1.size().mkString(",").equals(boxes2.size().mkString(",")), s"boxes1 shape ${boxes1.size().mkString(",")} != boxes2 shape ${boxes2.size().mkString(",")}")
+    val shape = boxes1.size()
+    val wh1 = boxes1.narrow(shape.length, 3, 2) / 2
+    val wh2 = boxes2.narrow(shape.length, 3, 2) / 2
+    val xy_1 = boxes1.narrow(shape.length, 1, 2)
+    val xy_2 = boxes2.narrow(shape.length, 1, 2)
     val box1_x0y0 = xy_1 - wh1
     val box1_x1y1 = xy_1 + wh1
     val box2_x0y0 = xy_2 - wh2
@@ -361,8 +381,8 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     box2_x1y1.cmax(box1_x0y0)
 
     //两个矩形的面积
-    val box1_area = (box1_x1y1.narrow(5, 1, 1) - box1_x0y0.narrow(5, 1, 1)) cmul (box1_x1y1.narrow(5, 2, 1) - box1_x0y0.narrow(5, 2, 1))
-    val box2_area = (box2_x1y1.narrow(5, 1, 1) - box2_x0y0.narrow(5, 1, 1)) cmul (box2_x1y1.narrow(5, 2, 1) - box2_x0y0.narrow(5, 2, 1))
+    val box1_area = (box1_x1y1.narrow(shape.length, 1, 1) - box1_x0y0.narrow(shape.length, 1, 1)) cmul (box1_x1y1.narrow(shape.length, 2, 1) - box1_x0y0.narrow(shape.length, 2, 1))
+    val box2_area = (box2_x1y1.narrow(shape.length, 1, 1) - box2_x0y0.narrow(shape.length, 1, 1)) cmul (box2_x1y1.narrow(shape.length, 2, 1) - box2_x0y0.narrow(shape.length, 2, 1))
 
     //相交矩形的左上和右下坐标
     val left_up = box1_x0y0.clone().cmax(box2_x0y0) //不改变原始值
@@ -370,13 +390,13 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
 
     //相交矩阵的面积
     val intersection = (right_down - left_up).apply1(math.max(0.0f, _))
-    val inter_area = intersection.narrow(5, 1, 1) cmul intersection.narrow(5, 2, 1)
+    val inter_area = intersection.narrow(shape.length, 1, 1) cmul intersection.narrow(shape.length, 2, 1)
     val union_area = box1_area + box2_area - inter_area
     val iou = inter_area / union_area.apply1(t => if (t == 0f) 1f else t) //避免分母为0
 
     //包围矩形的左上右下坐标
     val enclose = (box1_x1y1.cmax(box2_x1y1) - box1_x0y0.cmin(box2_x0y0)).apply1(math.max(0.0f, _))
-    val enclose_area = enclose.narrow(5, 1, 1) cmul enclose.narrow(5, 2, 1)
+    val enclose_area = enclose.narrow(shape.length, 1, 1) cmul enclose.narrow(shape.length, 2, 1)
 
     iou.sub((enclose_area - union_area) / enclose_area)
   }
@@ -386,7 +406,7 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     *
     * @param predict tensor
     */
-  def nonMaxSuppression(predict: Tensor[Float]): mutable.Map[String, Array[(Float, Float, Float, Float, Float)]] = {
+  def nonMaxSuppression(predict: Tensor[Float], lambdaNoObj: Double, lambdaCoord: Double): mutable.Map[String, Array[(Float, Float, Float, Float, Float)]] = {
     val result = new mutable.HashMap[String, Array[(Float, Float, Float, Float, Float)]]() //key=class,value=(x0,y0,x1,y1,score)
     for (i <- 1 to predict.size(1)) { //batch size
       val ith = predict.select(1, i) //tensor[N*N,5+c]
@@ -463,13 +483,122 @@ class YOLOLayer(lambdaCoord: Float, lambdaNoObj: Float) {
     val newShape = t1.size().take(t1.size().length - 1) ++ Array(lastDim + size.sum)
     Tensor(result.toArray, newShape)
   }
+
+  /**
+    * 读取图片
+    *
+    * @param path 图片路径
+    * @return
+    */
+  def readRawImage(path: Path): BufferedImage = {
+    var fis: FileInputStream = null
+    try {
+      fis = new FileInputStream(path.toString)
+      val channel = fis.getChannel
+      val byteArrayOutputStream = new ByteArrayOutputStream
+      channel.transferTo(0, channel.size, Channels.newChannel(byteArrayOutputStream))
+      val image = ImageIO.read(new ByteArrayInputStream(byteArrayOutputStream.toByteArray))
+      require(image != null, "Can't read file " + path + ", ImageIO.read is null")
+      image
+    } catch {
+      case ex: Exception =>
+        ex.printStackTrace()
+        System.err.println("Can't read file " + path)
+        throw ex
+    } finally {
+      if (fis != null) {
+        fis.close()
+      }
+    }
+  }
 }
 
 object YOLO3Detection {
+
+  def load(str: String, num_class: Int, max_bbox_per_scale: Int, anchors: Array[Array[Double]]): Array[ByteRecord] = {
+    val file = new BufferedReader(new FileReader(str))
+
+    val train_input_sizes = 416
+    val strides = Array(8, 16, 32)
+    val grid = strides.map(train_input_sizes / _)
+
+    val result = new ArrayBuffer[Sample[Float]]()
+    var line = file.readLine()
+    while (line != null) {
+      val split = line.split(" ")
+      val image_path = split(0)
+      val bi = YOLOUtil.readRawImage(Paths.get(image_path))
+      val height = bi.getHeight
+      val width = bi.getWidth()
+      val img = BGRImage.resizeImage(bi, train_input_sizes, train_input_sizes) //映射为416*416
+      val bgr = new BGRImage(train_input_sizes, train_input_sizes).copy(img)
+      val label_sbbox = Tensor(grid(0), grid(0), 3, 5 + num_class)
+      val label_mbbox = Tensor(grid(1), grid(1), 3, 5 + num_class)
+      val label_lbbox = Tensor(grid(2), grid(2), 3, 5 + num_class)
+
+      val sbboxes = Tensor(max_bbox_per_scale, 4)
+      val mbboxes = Tensor(max_bbox_per_scale, 4)
+      val lbboxes = Tensor(max_bbox_per_scale, 4)
+
+      val boxes = new ArrayBuffer[(Int, Int, Int, Int, Int)]()
+      if (split.length == 1) {
+        boxes += ((10, 10, 101, 103, 0)) //没有标注物，当做背景图
+      } else {
+        split.tail.foreach(s => { //多个box
+          val Array(x0, y0, x1, y1, classes) = s.split(",").map(_.toInt)
+          val scale_x0 = train_input_sizes * x0 / height
+          val scale_y0 = train_input_sizes * y0 / width
+          val scale_x1 = train_input_sizes * x1 / height
+          val scale_y1 = train_input_sizes * y1 / width
+          val x = (scale_x0 + scale_x1) * 0.5f
+          val y = (scale_y0 + scale_y1) * 0.5f
+          val w = scale_x1 - scale_x0
+          val h = scale_y1 - scale_y0
+          val bbox_xywh_scale = Tensor(strides.flatMap(t => Array(x / t, y / t, w * 1f / t, h * 1f / t)), Array(3, 4)) //3*4
+          for (elem <- anchors) {
+            val elem_tensor = Tensor(elem.map(_.toFloat), Array(3, 2))
+            val anchors_scale = bbox_xywh_scale.narrow(2, 1, 2).apply1(t => math.floor(t).toInt + 0.5f)
+            YOLOUtil.concat(anchors_scale, elem_tensor)
+          }
+          boxes += ((scale_x0, scale_y0, scale_x1, scale_y1, classes))
+        })
+      }
+      val image = Tensor(bgr.content, Array(train_input_sizes, train_input_sizes))
+      result += Sample(Array(image), Array(image, image))
+      line = file.readLine()
+    }
+
+    Array()
+  }
+
   def main(args: Array[String]): Unit = {
-    val tensor = Tensor(Array(2f, 1f, 2f, 2f), Array(1, 1, 1, 1, 4))
-    val tensor2 = Tensor(Array(1f, 2f, 2f, 2f), Array(1, 1, 1, 1, 4))
-    val d = new YOLOLayer(0.5f, 0.2f)
-    println(d.giou(tensor, tensor2))
+    val train_path = "voc2012_train.txt"
+    val val_path = "voc2012_val.txt"
+    val classes_path = "voc_classes.txt"
+    val file = new BufferedReader(new FileReader(classes_path))
+    var num_classes = 1
+    var line = file.readLine()
+    while (line != null) {
+      num_classes += 1
+      line = file.readLine()
+    }
+    val anchors = Array(Array(1.25, 1.625, 2.0, 3.75, 4.125, 2.875), Array(1.875, 3.8125, 3.875, 2.8125, 3.6875, 7.4375), Array(3.625, 2.8125, 4.875, 6.1875, 11.65625, 10.1875))
+    val max_bbox_per_scale = 150
+    val iou_loss_thresh = 0.7
+    val alpha_1 = 0.5
+    val alpha_2 = 0.5
+    val alpha_3 = 0.5
+
+    //读取数据
+    val train = DataSet.array(load(train_path, num_classes, max_bbox_per_scale, anchors)) -> BytesToBGRImg() -> BGRImgToBatch(10)
+    val valid = DataSet.array(load(val_path, num_classes, max_bbox_per_scale, anchors)) -> BytesToBGRImg() -> BGRImgToBatch(1)
+
+    val model = new YOLO3Model(3, num_classes)
+    val criterion = YOLOCriterion(num_classes, iou_loss_thresh, anchors, alpha_1, alpha_2, alpha_3)
+
+    val optimizer = Optimizer(model.createModel(), train, criterion)
+    optimizer.setValidation(Trigger.everyEpoch, valid, Array(new Top1Accuracy[Float]()))
+      .setEndWhen(Trigger.maxEpoch(4))
+      .optimize()
   }
 }
